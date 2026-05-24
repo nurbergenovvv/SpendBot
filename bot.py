@@ -1,8 +1,9 @@
 import os
-import sqlite3
 import random
 import string
 from datetime import datetime, timedelta
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -15,18 +16,21 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@your_username")
 KASPI_NUMBER = os.getenv("KASPI_NUMBER", "87011885707")
 PRICE = os.getenv("PRICE", "1 990")
 TRIAL_DAYS = 3
-DB_PATH = "spending.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ─────────────────────────────────────────────
-# БАЗА ДАННЫХ
+# БАЗА ДАННЫХ (PostgreSQL)
 # ─────────────────────────────────────────────
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id     INTEGER PRIMARY KEY,
+            user_id     BIGINT PRIMARY KEY,
             username    TEXT,
             full_name   TEXT,
             joined_at   TEXT,
@@ -37,8 +41,8 @@ def init_db():
     """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS expenses (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER,
+            id          SERIAL PRIMARY KEY,
+            user_id     BIGINT,
             amount      REAL,
             category    TEXT,
             label       TEXT,
@@ -48,7 +52,7 @@ def init_db():
     """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS budgets (
-            user_id     INTEGER,
+            user_id     BIGINT,
             category    TEXT,
             amount      REAL,
             PRIMARY KEY (user_id, category)
@@ -58,26 +62,29 @@ def init_db():
     conn.close()
 
 def get_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    c.execute("SELECT user_id, username, full_name, joined_at, trial_ends, sub_ends, verify_code FROM users WHERE user_id=%s", (user_id,))
     row = c.fetchone()
     conn.close()
     return row
 
 def register_user(user_id, username, full_name):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
     trial_ends = (datetime.utcnow() + timedelta(days=TRIAL_DAYS)).isoformat()
     c.execute("""
-        INSERT OR IGNORE INTO users (user_id, username, full_name, joined_at, trial_ends)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO users (user_id, username, full_name, joined_at, trial_ends)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO NOTHING
     """, (user_id, username, full_name, now, trial_ends))
     conn.commit()
     conn.close()
 
 def is_active(user_id):
+    if user_id == ADMIN_ID:
+        return True
     user = get_user(user_id)
     if not user:
         return False
@@ -92,46 +99,46 @@ def is_active(user_id):
 
 def generate_code(user_id):
     code = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET verify_code=? WHERE user_id=?", (code, user_id))
+    c.execute("UPDATE users SET verify_code=%s WHERE user_id=%s", (code, user_id))
     conn.commit()
     conn.close()
     return code
 
 def confirm_payment(code):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE verify_code=?", (code,))
+    c.execute("SELECT user_id FROM users WHERE verify_code=%s", (code,))
     row = c.fetchone()
     if not row:
         conn.close()
         return None
     user_id = row[0]
     sub_ends = (datetime.utcnow() + timedelta(days=30)).isoformat()
-    c.execute("UPDATE users SET sub_ends=?, verify_code=NULL WHERE user_id=?", (sub_ends, user_id))
+    c.execute("UPDATE users SET sub_ends=%s, verify_code=NULL WHERE user_id=%s", (sub_ends, user_id))
     conn.commit()
     conn.close()
     return user_id
 
 def add_expense(user_id, amount, category, label="", note=""):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
     c.execute("""
         INSERT INTO expenses (user_id, amount, category, label, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
     """, (user_id, amount, category, label, note, now))
     conn.commit()
     conn.close()
 
 def get_expenses(user_id, days=30):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     since = (datetime.utcnow() - timedelta(days=days)).isoformat()
     c.execute("""
         SELECT amount, category, label, note, created_at FROM expenses
-        WHERE user_id=? AND created_at >= ?
+        WHERE user_id=%s AND created_at >= %s
         ORDER BY created_at DESC
     """, (user_id, since))
     rows = c.fetchall()
@@ -139,12 +146,12 @@ def get_expenses(user_id, days=30):
     return rows
 
 def get_today_expenses(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     since = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     c.execute("""
         SELECT amount, category, label, note, created_at FROM expenses
-        WHERE user_id=? AND created_at >= ?
+        WHERE user_id=%s AND created_at >= %s
         ORDER BY created_at DESC
     """, (user_id, since))
     rows = c.fetchall()
@@ -152,18 +159,20 @@ def get_today_expenses(user_id):
     return rows
 
 def get_budget(user_id, category):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT amount FROM budgets WHERE user_id=? AND category=?", (user_id, category))
+    c.execute("SELECT amount FROM budgets WHERE user_id=%s AND category=%s", (user_id, category))
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
 
 def set_budget(user_id, category, amount):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO budgets (user_id, category, amount) VALUES (?, ?, ?)",
-              (user_id, category, amount))
+    c.execute("""
+        INSERT INTO budgets (user_id, category, amount) VALUES (%s, %s, %s)
+        ON CONFLICT (user_id, category) DO UPDATE SET amount=%s
+    """, (user_id, category, amount, amount))
     conn.commit()
     conn.close()
 
@@ -283,7 +292,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await settings_menu(update, ctx)
         return
 
-    # Быстрое добавление: "1500 Еда кофе"
     parts = text.split(maxsplit=2)
     if parts and parts[0].replace(".", "").replace(",", "").isdigit():
         if not await check_access(update): return
@@ -418,7 +426,9 @@ async def settings_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sub_ends   = user[5]
     trial_ends = user[4]
     status = "—"
-    if sub_ends:
+    if update.effective_user.id == ADMIN_ID:
+        status = "👑 Администратор (безлимитный доступ)"
+    elif sub_ends:
         status = f"Pro до {sub_ends[:10]}"
     elif trial_ends:
         days_left = (datetime.fromisoformat(trial_ends) - datetime.utcnow()).days + 1
@@ -489,13 +499,13 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update): return
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT id, amount, category FROM expenses WHERE user_id=? ORDER BY id DESC LIMIT 1",
+    c.execute("SELECT id, amount, category FROM expenses WHERE user_id=%s ORDER BY id DESC LIMIT 1",
               (update.effective_user.id,))
     row = c.fetchone()
     if row:
-        c.execute("DELETE FROM expenses WHERE id=?", (row[0],))
+        c.execute("DELETE FROM expenses WHERE id=%s", (row[0],))
         conn.commit()
         await update.message.reply_text(f"🗑 Удалено: *{row[2]}* — {row[1]:,.0f} ₸", parse_mode="Markdown")
     else:
