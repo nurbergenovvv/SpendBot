@@ -3,7 +3,7 @@ import sqlite3
 import random
 import string
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
@@ -11,11 +11,10 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@your_username")  # например @diasnur
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@your_username")
 KASPI_NUMBER = os.getenv("KASPI_NUMBER", "87011885707")
 PRICE = os.getenv("PRICE", "1 990")
 TRIAL_DAYS = 3
-
 DB_PATH = "spending.db"
 
 # ─────────────────────────────────────────────
@@ -169,7 +168,7 @@ def set_budget(user_id, category, amount):
     conn.close()
 
 # ─────────────────────────────────────────────
-# КАТЕГОРИИ И ИНТЕРФЕЙС
+# ИНТЕРФЕЙС
 # ─────────────────────────────────────────────
 
 DEFAULT_CATEGORIES = [
@@ -229,7 +228,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     register_user(user.id, user.username, user.full_name)
     db_user = get_user(user.id)
     trial_ends = datetime.fromisoformat(db_user[4])
-    days_left = (trial_ends - datetime.utcnow()).days + 1
+    days_left = max((trial_ends - datetime.utcnow()).days + 1, 0)
 
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
@@ -247,10 +246,7 @@ async def check_access(update: Update) -> bool:
     user_id = update.effective_user.id
     if is_active(user_id):
         return True
-    await update.message.reply_text(
-        paywall_text(user_id),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(paywall_text(user_id), parse_mode="Markdown")
     return False
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -260,10 +256,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text == "➕ Добавить расход":
         if not await check_access(update): return
         ctx.user_data["adding"] = True
-        await update.message.reply_text(
-            "Выбери категорию:",
-            reply_markup=category_keyboard()
-        )
+        await update.message.reply_text("Выбери категорию:", reply_markup=category_keyboard())
         return
 
     if text == "📊 Отчёт":
@@ -401,12 +394,11 @@ async def show_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows_7  = get_expenses(user_id, 7)
     today   = get_today_expenses(user_id)
 
-    total_30 = sum(r[0] for r in rows_30)
-    total_7  = sum(r[0] for r in rows_7)
+    total_30    = sum(r[0] for r in rows_30)
+    total_7     = sum(r[0] for r in rows_7)
     total_today = sum(r[0] for r in today)
-    avg_day = total_30 / 30 if rows_30 else 0
-
-    top_cat = (
+    avg_day     = total_30 / 30 if rows_30 else 0
+    top_cat     = (
         max(set(r[1] for r in rows_30), key=lambda c: sum(r[0] for r in rows_30 if r[1] == c))
         if rows_30 else "—"
     )
@@ -423,7 +415,7 @@ async def show_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def settings_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.effective_user.id)
-    sub_ends = user[5]
+    sub_ends   = user[5]
     trial_ends = user[4]
     status = "—"
     if sub_ends:
@@ -480,7 +472,7 @@ async def cmd_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     code = ctx.args[0].upper()
     activated_user_id = confirm_payment(code)
     if activated_user_id:
-        await update.message.reply_text(f"✅ Подписка активирована для пользователя `{activated_user_id}`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Подписка активирована для `{activated_user_id}`", parse_mode="Markdown")
         try:
             await ctx.bot.send_message(
                 chat_id=activated_user_id,
@@ -493,14 +485,14 @@ async def cmd_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Код `{code}` не найден.", parse_mode="Markdown")
 
 async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.message.reply_text(paywall_text(user_id), parse_mode="Markdown")
+    await update.message.reply_text(paywall_text(update.effective_user.id), parse_mode="Markdown")
 
 async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update): return
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, amount, category FROM expenses WHERE user_id=? ORDER BY id DESC LIMIT 1", (update.effective_user.id,))
+    c.execute("SELECT id, amount, category FROM expenses WHERE user_id=? ORDER BY id DESC LIMIT 1",
+              (update.effective_user.id,))
     row = c.fetchone()
     if row:
         c.execute("DELETE FROM expenses WHERE id=?", (row[0],))
@@ -517,7 +509,6 @@ async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("budget", cmd_budget))
@@ -526,7 +517,6 @@ def main():
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     print("Бот запущен...")
     app.run_polling()
 
