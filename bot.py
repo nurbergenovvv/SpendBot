@@ -292,28 +292,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await settings_menu(update, ctx)
         return
 
-    parts = text.split(maxsplit=2)
-    if parts and parts[0].replace(".", "").replace(",", "").isdigit():
-        if not await check_access(update): return
-        amount = float(parts[0].replace(",", "."))
-        category = parts[1] if len(parts) > 1 else "Другое"
-        note = parts[2] if len(parts) > 2 else ""
-        add_expense(user_id, amount, category, note=note)
-
-        budget = get_budget(user_id, category)
-        budget_msg = ""
-        if budget:
-            spent = sum(r[0] for r in get_expenses(user_id, 30) if r[1] == category)
-            pct = spent / budget * 100
-            if pct >= 90:
-                budget_msg = f"\n⚠️ Использовано {pct:.0f}% бюджета на {category}!"
-
-        await update.message.reply_text(
-            f"✅ *{amount:,.0f} ₸* — {category}" + (f"\n📝 {note}" if note else "") + budget_msg,
-            parse_mode="Markdown"
-        )
-        return
-
+    # Сначала проверяем — ждём ли сумму после выбора категории кнопкой
     if ctx.user_data.get("waiting_amount"):
         try:
             parts = text.split(maxsplit=1)
@@ -331,13 +310,39 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 if pct >= 90:
                     budget_msg = f"\n⚠️ Использовано {pct:.0f}% бюджета на {category}!"
 
+            undo_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data="undo_last")]])
             await update.message.reply_text(
                 f"✅ *{amount:,.0f} ₸* — {category}" + (f"\n📝 {note}" if note else "") + budget_msg,
                 parse_mode="Markdown",
-                reply_markup=main_keyboard()
+                reply_markup=undo_btn
             )
         except:
             await update.message.reply_text("Введи сумму, например: `1500`", parse_mode="Markdown")
+        return
+
+    # Быстрый ввод без кнопок: "1500 Еда кофе"
+    parts = text.split(maxsplit=2)
+    if parts and parts[0].replace(".", "").replace(",", "").isdigit():
+        if not await check_access(update): return
+        amount = float(parts[0].replace(",", "."))
+        category = parts[1] if len(parts) > 1 else "Другое"
+        note = parts[2] if len(parts) > 2 else ""
+        add_expense(user_id, amount, category, note=note)
+
+        budget = get_budget(user_id, category)
+        budget_msg = ""
+        if budget:
+            spent = sum(r[0] for r in get_expenses(user_id, 30) if r[1] == category)
+            pct = spent / budget * 100
+            if pct >= 90:
+                budget_msg = f"\n⚠️ Использовано {pct:.0f}% бюджета на {category}!"
+
+        undo_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data="undo_last")]])
+        await update.message.reply_text(
+            f"✅ *{amount:,.0f} ₸* — {category}" + (f"\n📝 {note}" if note else "") + budget_msg,
+            parse_mode="Markdown",
+            reply_markup=undo_btn
+        )
         return
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -357,6 +362,19 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Категория: *{cat}*\n\nВведи сумму (и заметку по желанию):\n`1500` или `1500 кофе доодо`",
             parse_mode="Markdown"
         )
+
+    elif data == "undo_last":
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT id, amount, category FROM expenses WHERE user_id=%s ORDER BY id DESC LIMIT 1", (user_id,))
+        row = c.fetchone()
+        if row:
+            c.execute("DELETE FROM expenses WHERE id=%s", (row[0],))
+            conn.commit()
+            await query.edit_message_text(f"🗑 Удалено: *{row[2]}* — {row[1]:,.0f} ₸", parse_mode="Markdown")
+        else:
+            await query.edit_message_text("Нет расходов для удаления.")
+        conn.close()
 
     elif data.startswith("report:"):
         days = int(data[7:])
